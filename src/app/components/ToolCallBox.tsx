@@ -164,7 +164,7 @@ export const ToolCallBox = React.memo<ToolCallBoxProps>(
               </div>
             ) : (
               <>
-                {Object.keys(args).length > 0 && (
+                {Object.keys(args).length > 0 && status === "completed" && (
                   <div className="mt-4">
                     <h4 className="mb-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
                       Arguments
@@ -206,7 +206,7 @@ export const ToolCallBox = React.memo<ToolCallBoxProps>(
                     </div>
                   </div>
                 )}
-                {result && (
+                {result && status === "completed" && (
                   <div className="mt-4">
                     <h4 className="mb-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
                       Result

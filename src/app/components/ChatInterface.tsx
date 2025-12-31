@@ -82,6 +82,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({ assistant }) => {
     sendMessage,
     stopStream,
     resumeInterrupt,
+    stateUpdateEvents,
   } = useChatContext();
 
   const submitDisabled = isLoading || !assistant;
@@ -116,11 +117,16 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({ assistant }) => {
      1. Loop through all messages
      2. For each AI message, add the AI message, and any tool calls to the messageMap
      3. For each tool message, find the corresponding tool call in the messageMap and update the status and output
+     4. Associate state update events with messages
     */
     const messageMap = new Map<
       string,
-      { message: Message; toolCalls: ToolCall[] }
+      { message: Message; toolCalls: ToolCall[]; stateEvents: typeof stateUpdateEvents }
     >();
+
+    // Find the last AI message ID for events without messageId
+    const lastAiMessageId = messages.filter((m) => m.type === "ai").pop()?.id;
+
     messages.forEach((message: Message) => {
       if (message.type === "ai") {
         const toolCallsInMessage: Array<{
@@ -148,25 +154,76 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({ assistant }) => {
           );
           toolCallsInMessage.push(...toolUseBlocks);
         }
-        const toolCallsWithStatus = toolCallsInMessage.map(
-          (toolCall: {
-            id?: string;
-            function?: { name?: string; arguments?: unknown };
-            name?: string;
-            type?: string;
-            args?: unknown;
-            input?: unknown;
-          }) => {
+
+        // Consolidate tool calls by ID to avoid duplicates during streaming
+        const consolidatedToolCalls = new Map<string, {
+          id?: string;
+          function?: { name?: string; arguments?: unknown };
+          name?: string;
+          type?: string;
+          args?: unknown;
+          input?: unknown;
+        }>();
+
+        toolCallsInMessage.forEach((toolCall) => {
+          const toolId = toolCall.id || `tool-${Math.random()}`;
+          const existing = consolidatedToolCalls.get(toolId);
+
+          if (existing) {
+            // Prefer the newer complete args over partial streaming data
+            const existingArgs = existing.args || existing.input;
+            const newArgs = toolCall.args || toolCall.input;
+
+            // If new args is an object and existing is a string, prefer the object
+            // If both are objects, merge them
+            // If new is string, keep existing unless it's also a string (then take newer)
+            let mergedArgs;
+            if (typeof newArgs === 'object' && newArgs !== null && !Array.isArray(newArgs)) {
+              if (typeof existingArgs === 'object' && existingArgs !== null && !Array.isArray(existingArgs)) {
+                mergedArgs = { ...existingArgs, ...newArgs };
+              } else {
+                mergedArgs = newArgs;
+              }
+            } else {
+              mergedArgs = newArgs || existingArgs || {};
+            }
+
+            consolidatedToolCalls.set(toolId, {
+              ...existing,
+              ...toolCall,
+              args: mergedArgs,
+            });
+          } else {
+            consolidatedToolCalls.set(toolId, toolCall);
+          }
+        });
+
+        const toolCallsWithStatus = Array.from(consolidatedToolCalls.values()).map(
+          (toolCall) => {
             const name =
               toolCall.function?.name ||
               toolCall.name ||
               toolCall.type ||
               "unknown";
-            const args =
+
+            // Get raw args
+            let rawArgs =
               toolCall.function?.arguments ||
               toolCall.args ||
               toolCall.input ||
               {};
+
+            // Parse args if they're a string (streaming incomplete JSON)
+            let args = rawArgs;
+            if (typeof rawArgs === "string") {
+              try {
+                args = JSON.parse(rawArgs);
+              } catch (e) {
+                // If parsing fails, it's incomplete streaming data, use empty object
+                args = {};
+              }
+            }
+
             return {
               id: toolCall.id || `tool-${Math.random()}`,
               name,
@@ -175,9 +232,36 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({ assistant }) => {
             } as ToolCall;
           }
         );
+
+        // Associate state update events with this AI message
+        // If events don't have messageId, only show the LATEST event on the last AI message
+        let eventsForMessage: typeof stateUpdateEvents = [];
+        if (message.id === lastAiMessageId) {
+          // For the last AI message, only show the most recent conversation event
+          const conversationEvents = stateUpdateEvents.filter(
+            (event) => event.node === "conversation" && !event.messageId
+          );
+          const latestConversationEvent = conversationEvents.length > 0
+            ? [conversationEvents[conversationEvents.length - 1]]
+            : [];
+
+          // Also include any events specifically for this message
+          const specificEvents = stateUpdateEvents.filter(
+            (event) => event.messageId === message.id
+          );
+
+          eventsForMessage = [...specificEvents, ...latestConversationEvent];
+        } else {
+          // For other messages, only show events specifically for this message
+          eventsForMessage = stateUpdateEvents.filter(
+            (event) => event.messageId === message.id
+          );
+        }
+
         messageMap.set(message.id!, {
           message,
           toolCalls: toolCallsWithStatus,
+          stateEvents: eventsForMessage,
         });
       } else if (message.type === "tool") {
         const toolCallId = message.tool_call_id;
@@ -202,18 +286,28 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({ assistant }) => {
         messageMap.set(message.id!, {
           message,
           toolCalls: [],
+          stateEvents: [],
         });
       }
     });
     const processedArray = Array.from(messageMap.values());
-    return processedArray.map((data, index) => {
+    const result = processedArray.map((data, index) => {
       const prevMessage = index > 0 ? processedArray[index - 1].message : null;
       return {
         ...data,
         showAvatar: data.message.type !== prevMessage?.type,
       };
     });
-  }, [messages, interrupt]);
+
+    console.log("📝 Processed messages with events:", result.map(r => ({
+      messageId: r.message.id,
+      type: r.message.type,
+      eventsCount: r.stateEvents.length,
+      events: r.stateEvents,
+    })));
+
+    return result;
+  }, [messages, interrupt, stateUpdateEvents]);
 
   const groupedTodos = {
     in_progress: todos.filter((t) => t.status === "in_progress"),
@@ -267,6 +361,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({ assistant }) => {
                     key={data.message.id}
                     message={data.message}
                     toolCalls={data.toolCalls}
+                    stateEvents={data.stateEvents}
                     isLoading={isLoading}
                     actionRequestsMap={
                       isLastMessage ? actionRequestsMap : undefined

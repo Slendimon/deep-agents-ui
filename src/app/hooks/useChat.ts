@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback } from "react";
+import { useCallback, useState } from "react";
 import { useStream } from "@langchain/langgraph-sdk/react";
 import {
   type Message,
@@ -13,6 +13,25 @@ import type { TodoItem } from "@/app/types/types";
 import { useClient } from "@/providers/ClientProvider";
 import { useQueryState } from "nuqs";
 
+export type StateUpdateEvent = {
+  id: string;
+  timestamp: number;
+  node: string;
+  updated_fields: string[];
+  state?: Record<string, unknown>;
+  messageId?: string; // To associate with a specific message
+};
+
+export type ConversationEventData = {
+  scale_human?: boolean;
+  conversation_state?: string;
+  request_saved?: boolean;
+  show_menu?: boolean;
+  sensitive_case_type?: string | null;
+  sensitive_case_message?: string | null;
+  sensitive_case_summary?: string | null;
+};
+
 export type StateType = {
   messages: Message[];
   todos: TodoItem[];
@@ -22,7 +41,19 @@ export type StateType = {
     subject?: string;
     page_content?: string;
   };
+  save_request?: boolean;
+  scale_human?: boolean;
+  shown_menu?: boolean;
+  conversation_state?: string | Record<string, unknown>;
   ui?: any;
+  state_update_events?: StateUpdateEvent[];
+  conversation_events?: ConversationEventData; // SSE event data
+  // Individual conversation event fields (for backward compatibility)
+  request_saved?: boolean;
+  show_menu?: boolean;
+  sensitive_case_type?: string | null;
+  sensitive_case_message?: string | null;
+  sensitive_case_summary?: string | null;
 };
 
 export function useChat({
@@ -37,6 +68,9 @@ export function useChat({
   const [threadId, setThreadId] = useQueryState("threadId");
   const client = useClient();
 
+  // State to capture conversation_events from the existing stream
+  const [conversationEventsFromSSE, setConversationEventsFromSSE] = useState<ConversationEventData[]>([]);
+
   const stream = useStream<StateType>({
     assistantId: activeAssistant?.assistant_id || "",
     client: client ?? undefined,
@@ -49,7 +83,17 @@ export function useChat({
     onFinish: onHistoryRevalidate,
     onError: onHistoryRevalidate,
     onCreated: onHistoryRevalidate,
-    experimental_thread: thread,
+    thread: thread,
+    // Capture custom events (conversation_events)
+    onCustomEvent: (data) => {
+      console.log("📨 onCustomEvent called with data:", data);
+      if (data && typeof data === "object") {
+        // El backend puede estar enviando los datos directamente o envueltos
+        const eventData = data as ConversationEventData;
+        console.log("✅ Captured conversation event:", eventData);
+        setConversationEventsFromSSE((prev) => [...prev, eventData]);
+      }
+    },
   });
 
   const sendMessage = useCallback(
@@ -144,6 +188,64 @@ export function useChat({
     stream.stop();
   }, [stream]);
 
+  console.log("📨 Conversation events from SSE:", conversationEventsFromSSE);
+
+  // Process conversation events from SSE into StateUpdateEvent format
+  const conversationEvents: StateUpdateEvent[] = conversationEventsFromSSE.map((convData: ConversationEventData) => {
+    const updatedFields: string[] = [];
+    const stateData: Record<string, unknown> = {};
+
+    // Check each field and add to updated_fields if it has a meaningful value
+    if (convData.scale_human === true) {
+      updatedFields.push("scale_human");
+      stateData.scale_human = true;
+    }
+
+    if (convData.request_saved === true) {
+      updatedFields.push("request_saved");
+      stateData.request_saved = true;
+    }
+
+    if (convData.show_menu === true) {
+      updatedFields.push("show_menu");
+      stateData.show_menu = true;
+    }
+
+    if (convData.conversation_state && convData.conversation_state !== "") {
+      updatedFields.push("conversation_state");
+      stateData.conversation_state = convData.conversation_state;
+    }
+
+    if (convData.sensitive_case_type) {
+      updatedFields.push("sensitive_case_type");
+      stateData.sensitive_case_type = convData.sensitive_case_type;
+      if (convData.sensitive_case_message) {
+        updatedFields.push("sensitive_case_message");
+        stateData.sensitive_case_message = convData.sensitive_case_message;
+      }
+      if (convData.sensitive_case_summary) {
+        updatedFields.push("sensitive_case_summary");
+        stateData.sensitive_case_summary = convData.sensitive_case_summary;
+      }
+    }
+
+    return {
+      id: uuidv4(),
+      timestamp: Date.now(),
+      node: "conversation",
+      updated_fields: updatedFields,
+      state: stateData,
+    };
+  }).filter((event: StateUpdateEvent) => event.updated_fields.length > 0); // Only include events with meaningful fields
+
+  // Combine server events with derived conversation events
+  const allStateUpdateEvents = [
+    ...(stream.values.state_update_events ?? []),
+    ...conversationEvents,
+  ];
+
+  console.log("🎯 All state update events:", allStateUpdateEvents);
+
   return {
     stream,
     todos: stream.values.todos ?? [],
@@ -162,5 +264,6 @@ export function useChat({
     stopStream,
     markCurrentThreadAsResolved,
     resumeInterrupt,
+    stateUpdateEvents: allStateUpdateEvents,
   };
 }

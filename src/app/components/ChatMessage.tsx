@@ -4,12 +4,14 @@ import React, { useMemo, useState, useCallback } from "react";
 import { SubAgentIndicator } from "@/app/components/SubAgentIndicator";
 import { ToolCallBox } from "@/app/components/ToolCallBox";
 import { MarkdownContent } from "@/app/components/MarkdownContent";
+import { StateUpdateEventComponent } from "@/app/components/StateUpdateEvent";
 import type {
   SubAgent,
   ToolCall,
   ActionRequest,
   ReviewConfig,
 } from "@/app/types/types";
+import type { StateUpdateEvent } from "@/app/hooks/useChat";
 import { Message } from "@langchain/langgraph-sdk";
 import {
   extractSubAgentContent,
@@ -20,6 +22,7 @@ import { cn } from "@/lib/utils";
 interface ChatMessageProps {
   message: Message;
   toolCalls: ToolCall[];
+  stateEvents?: StateUpdateEvent[];
   isLoading?: boolean;
   actionRequestsMap?: Map<string, ActionRequest>;
   reviewConfigsMap?: Map<string, ReviewConfig>;
@@ -33,6 +36,7 @@ export const ChatMessage = React.memo<ChatMessageProps>(
   ({
     message,
     toolCalls,
+    stateEvents = [],
     isLoading,
     actionRequestsMap,
     reviewConfigsMap,
@@ -131,12 +135,23 @@ export const ChatMessage = React.memo<ChatMessageProps>(
                 );
                 const actionRequest = actionRequestsMap?.get(toolCall.name);
                 const reviewConfig = reviewConfigsMap?.get(toolCall.name);
+
+                // Only show tool calls that are completed, have a UI component, or have an action request
+                const shouldShow =
+                  toolCall.status === "completed" ||
+                  toolCall.status === "error" ||
+                  toolCall.status === "interrupted" ||
+                  toolCallGenUiComponent ||
+                  actionRequest;
+
+                if (!shouldShow) return null;
+
                 return (
                   <ToolCallBox
                     key={toolCall.id}
                     toolCall={toolCall}
                     uiComponent={toolCallGenUiComponent}
-                    stream={stream}
+                    stream={toolCallGenUiComponent ? stream : undefined}
                     graphId={graphId}
                     actionRequest={actionRequest}
                     reviewConfig={reviewConfig}
@@ -145,6 +160,13 @@ export const ChatMessage = React.memo<ChatMessageProps>(
                   />
                 );
               })}
+            </div>
+          )}
+          {!isUser && stateEvents.length > 0 && (
+            <div className="mt-4 flex w-full flex-col gap-2">
+              {stateEvents.map((event) => (
+                <StateUpdateEventComponent key={event.id} event={event} />
+              ))}
             </div>
           )}
           {!isUser && subAgents.length > 0 && (
